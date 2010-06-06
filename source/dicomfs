@@ -22,10 +22,12 @@ fuse.fuse_python_api = (0, 2)
 
 
 def listPatients(self):
-	return commands.getoutput("/usr/bin/findscu -aec "+self.aec+" -k 0008,0052=STUDY -k 0020,000d  "+self.serveraddress+" "+self.serverport+" |grep PatientsName | sed 's/.*\[\(.*\)\].*/\\1/'").replace(";","_").replace("/","_").splitlines()
+	print("/usr/bin/findscu -S -aec "+self.aec+" -k 0008,0052=STUDY -k 0020,000d  "+self.serveraddress+" "+self.serverport+" |grep PatientsName | sed 's/.*\[\(.*\)\].*/\\1/'")
+	return commands.getoutput("/usr/bin/findscu -S -aec "+self.aec+" -k 0008,0052=STUDY -k 0020,000d  "+self.serveraddress+" "+self.serverport+" |grep PatientsName | sed 's/.*\[\(.*\)\].*/\\1/'").replace(";","_").replace("/","_").splitlines()
 
 def listStudies(self):
-	return commands.getoutput("/usr/bin/findscu -aec "+self.aec+" -k 0008,0052=STUDY -k 0020,000d "+self.serveraddress+" "+self.serverport+" |grep '^(0020,000d)' | sed 's/.*\[\(.*\)\].*/\\1/'" ).replace(";","_").replace("/","_").splitlines()
+	print("Command: %s" % ("/usr/bin/findscu -S -aec "+self.aec+" -k 0008,0052=STUDY -k 0020,000d "+self.serveraddress+" "+self.serverport+" |grep '^(0020,000d)' | sed 's/.*\[\(.*\)\].*/\\1/'" ))
+	return commands.getoutput("/usr/bin/findscu -S -aec "+self.aec+" -k 0008,0052=STUDY -k 0020,000d "+self.serveraddress+" "+self.serverport+" |grep '^(0020,000d)' | sed 's/.*\[\(.*\)\].*/\\1/'" ).replace(";","_").replace("/","_").splitlines()
 
 def uploadFile(self,path):
 	commands.getoutput("/usr/bin/storescu -R -aec "+self.aec+" "+self.serveraddress+" "+self.serverport+" -aet "+self.aet +' "'+path +'"')
@@ -35,7 +37,8 @@ def downloadStudy(self,studyID):
 	lastdir=os.getcwd()
 	os.makedirs(self.cachedir+"/Studies/"+studyID)
 	os.chdir(self.cachedir+"/Studies/"+studyID)
-	commands.getoutput("/usr/bin/movescu --prefer-jpeg8 --bit-preserving " + self.serveraddress+" "+self.serverport+" -aec "+self.aec+ " -S +P "+self.localport+" --aetitle "+self.aet+ " -aem "+self.aet+" --key 0020,000D="+studyID+" --key 0008,0052=STUDY")
+	print("/usr/bin/movescu -P --prefer-jpeg8 --bit-preserving " + self.serveraddress+" "+self.serverport+" -aec "+self.aec+ " -S +P "+self.localport+" --aetitle "+self.aet+ " -aem "+self.aet+" --key 0020,000D="+studyID+" --key 0008,0052=STUDY")
+	commands.getoutput("/usr/bin/movescu -P --prefer-jpeg8 --bit-preserving " + self.serveraddress+" "+self.serverport+" -aec "+self.aec+ " -S +P "+self.localport+" --aetitle "+self.aet+ " -aem "+self.aet+" --key 0020,000D="+studyID+" --key 0008,0052=STUDY")
 	result=commands.getoutput("ls "+self.cachedir+"/Studies/"+studyID+"/")
 	os.chdir(lastdir)
 	return result.replace(";","_").replace("/","_").splitlines()
@@ -84,10 +87,15 @@ def getLevels(path):
 class XmpFile(object):
 
         def __init__(self, path, flags, *mode):
+            self.cachedir="/tmp/dicomfs"
+            if os.path.exists(self.cachedir + path) == False:
+		if os.path.exists(os.path.dirname(server.root+path)):
+			commands.getoutput('ls "'+server.root+path+'"')
             self.file = os.fdopen(os.open(self.cachedir + path, flags, *mode),
                                   flag2mode(flags))
             self.fd = self.file.fileno()
             self.upload = False
+
 
         def read(self, length, offset):
             self.file.seek(offset)
@@ -201,6 +209,8 @@ class DicomFS(Fuse):
 		self.runOnce()
 		if path in self.attributeCache:
 			return self.attributeCache[path]
+#		self.readdir(os.path.dirname(path),0)
+#		self.readdir(os.path.basename(path),0)
 		st = MyStat()
 		if len(getLevels(path)) <=3:
 			st.st_mode = stat.S_IFDIR | 0755
@@ -208,6 +218,7 @@ class DicomFS(Fuse):
 		else:
 			st=os.lstat(self.cachedir + path)
 		self.attributeCache[path]=st
+
 		return self.attributeCache[path]
 
 	def readdir(self, path, offset):
@@ -233,7 +244,6 @@ class DicomFS(Fuse):
 			tmp.extend(listStudies(self))
 
 		if len(getLevels(path))>2 and getLevels(path)[1] == 'Studies':
-#			commands.getoutput("/home/dvolgyes/workspace/dicomfs/downloadStudy.pl "+)
 			downloadStudy(self,getLevels(path)[2])
 			tmp.extend(commands.getoutput("ls "+self.cachedir+path).splitlines())
 
