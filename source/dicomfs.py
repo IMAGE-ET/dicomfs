@@ -148,7 +148,25 @@ class DicomConnection(object):
         self.tag_infmodel = gdcm.Tag(0x0008,0x0052)
         self.tag_SOP_UID = gdcm.Tag(0x08,0x0018)        
 
-        self.tag_patientname = gdcm.Tag(0x10,0x10)
+        self.tag_PatientName = gdcm.Tag(0x10,0x10)
+        self.tag_PatientID = gdcm.Tag(0x10,0x20)        
+        self.tag_Patient = [self.tag_PatientName]
+#Patient's Name 	(0010,0010) 	R
+#Patient ID 	(0010,0020) 	U
+#Referenced Patient Sequence 	(0008,1120) 	O
+#>Referenced SOP Class UID 	(0008,1150) 	O
+#>Referenced SOP Instance UID 	(0008,1155) 	O
+#Patient's Birth Date 	(0010,0030) 	O
+#Patient's Birth Time 	(0010,0032) 	O
+#Patient's Sex 	(0010,0040) 	O
+#Other Patient Ids 	(0010,1000) 	O
+#Other Patient Names 	(0010,1001) 	O
+#Ethnic Group 	(0010,2160) 	O
+#Patient Comments 	(0010,4000) 	O
+#Number of Patient Related Studies 	(0020,1200) 	O
+#Number of Patient Related Series 	(0020,1202) 	O
+#Number of Patient Related Instances 	(0020,1204) 	O
+#All other Attributes at Patient Level 		O 
 
     def ping(self):
         self.pingStart=time.time()
@@ -158,13 +176,41 @@ class DicomConnection(object):
         return self.pingStop-self.pingStart
 
 
-    def StudyRoot_listStudies(self):  # root query
+    def listPatients(self):  # root query
+
+        self.d=DicomDataset()
+        self.queryTag=self.tag_PatientID
+        self.d.add(self.queryTag)
+        for tag in self.tag_Patient:
+            self.d.add(tag)
+        
+        self.cnf = gdcm.CompositeNetworkFunctions()
+        self.theQuery = self.cnf.ConstructQuery (gdcm.eStudyRootType,gdcm.eStudy,self.d.get())
+        self.ret_query= gdcm.DataSetArrayType()
+
+        self.cnf.CFind(self.server,self.remoteport,self.theQuery,self.ret_query,self.aetitle,self.caller)
+        UIDs=[]
+        desc=[]
+        timestamps=[]
+        for i in range(0,self.ret_query.size()):
+            x=str(self.ret_query[i].GetDataElement( self.queryTag ).GetValue())
+            if x in UIDs: continue
+            UIDs.append(str(self.ret_query[i].GetDataElement( self.queryTag ).GetValue()))
+            desc.append(str(self.ret_query[i].GetDataElement( self.tag_PatientName ).GetValue()))
+            timestamps.append(0)
+
+        return UIDs,desc,timestamps
+
+
+    def listStudies(self,patientID=None):  # root query
 
         self.d=DicomDataset()
         self.queryTag=self.tag_StudyUID
         self.d.add(self.queryTag)
         for tag in self.tag_Study:
             self.d.add(tag)
+        if patientID!=None:
+            self.d.add(self.tag_PatientID,patientID)
         
         self.cnf = gdcm.CompositeNetworkFunctions()
         self.theQuery = self.cnf.ConstructQuery (gdcm.eStudyRootType,gdcm.eStudy,self.d.get())
@@ -194,7 +240,7 @@ class DicomConnection(object):
         return UIDs,desc,timestamp
         
 
-    def StudyRoot_listSeries(self,studyUID):  # root query
+    def listSeries(self,studyUID,patientID=None):  # root query
         self.d=DicomDataset()
         self.queryTag=self.tag_SeriesUID
 
@@ -206,6 +252,8 @@ class DicomConnection(object):
             self.d.add(tag)
         for tag in self.tag_Series:
             self.d.add(tag)
+        if patientID!=None:
+            self.d.add(self.tag_PatientID,patientID)
 
         self.cnf = gdcm.CompositeNetworkFunctions()
         self.theQuery = self.cnf.ConstructQuery (gdcm.eStudyRootType,gdcm.eSeries,self.d.get())
@@ -225,7 +273,7 @@ class DicomConnection(object):
         return UIDs,desc,modality
 
 
-    def StudyRoot_downloadSeries(self,studyUID,seriesUID,outputdir):
+    def downloadSeries(self,studyUID,seriesUID,outputdir,patientID=None):
             hashdir=hashlib.sha224(studyUID+"/"+seriesUID).hexdigest()
             targetdir=outputdir+"/"+hashdir+"/"
 
@@ -245,7 +293,6 @@ class DicomConnection(object):
 
             self.cnf_series = gdcm.CompositeNetworkFunctions()
             self.theSeriesQuery = self.cnf_series.ConstructQuery (gdcm.eStudyRootType,gdcm.eSeries,self.dataset_seriesQuery)
-
            # Execute the C-FIND query
             self.cnf_series.CMove(self.server,self.remoteport,self.theSeriesQuery, self.localport,self.aetitle,self.caller,targetdir)
             return targetdir
@@ -287,6 +334,9 @@ class DicomFS(Fuse):
         self.study_mapping=dict()
         self.series_mapping=dict()       
         self.studyTimestamp=dict()
+        self.patient_mapping=dict()
+        self.patientroot_study_mapping=dict()
+        self.patientroot_series_mapping=dict()        
         fileaccessCache=dict()       
 
     def empty(self):
@@ -306,6 +356,10 @@ class DicomFS(Fuse):
         st = MyStat()
 
         if len(self.pathparts)<=4:
+            st.st_mode = stat.S_IFDIR | 0755
+            st.st_nlink = 2
+
+        if (len(self.pathparts))>0 and self.pathparts[1]=='Patient-Study-Series-Instance' and len(self.pathparts)<=5:
             st.st_mode = stat.S_IFDIR | 0755
             st.st_nlink = 2
           
@@ -330,34 +384,87 @@ class DicomFS(Fuse):
         tmp.append('..')
 
         if path == '':
-            tmp.extend(['Study-Series-Instance','Study-Series-Instance_UID', 'clear_cache']) # 'Patient-Study-Modality-Series-Instance'
-
-        if path_stripped == 'Patient-Study-Modality-Series-Instance':
-            pass
+            tmp.extend(['Patient-Study-Series-Instance','Study-Series-Instance','Study-Series-Instance_UID', 'clear_cache']) # 'Patient-Study-Modality-Series-Instance'
 
         if path_stripped == 'Study-Series-Instance_UID':
-            study,desc,timestamp=self.dicomConnection.StudyRoot_listStudies()
+            study,desc,timestamp=self.dicomConnection.listStudies()
             for i in range(0,len(study)):
                 s=("%s - %s" % (desc[i],study[i])).replace("/","")
                 tmp.append(study[i])
                 self.study_mapping[s]=study[i]
 
         if path_stripped == 'Study-Series-Instance':
-            study,desc,timestamp=self.dicomConnection.StudyRoot_listStudies()
+            study,desc,timestamp=self.dicomConnection.listStudies()
             for i in range(0,len(study)):
                 s=("%s - %s" % (desc[i],study[i])).replace("/","")
                 tmp.append(s)
                 self.study_mapping[s]=study[i]
                 self.studyTimestamp[study[i]]=timestamp[i]
 
+        if path_stripped == 'Patient-Study-Series-Instance':
+            patient,desc,timestamp=self.dicomConnection.listPatients()
+            for i in range(0,len(patient)):
+                s=("%s ID:%s" % (desc[i],patient[i])).replace("/","")
+                tmp.append(s)
+                self.patient_mapping[s]=patient[i]
+
+
         self.pathparts=path.split('/')
+
+        if len(self.pathparts)==2 and self.pathparts[0] == 'Patient-Study-Series-Instance':
+            if self.pathparts[1] in self.patient_mapping:
+                patientID=self.patient_mapping[self.pathparts[1]]
+            else:
+                patientID=self.pathparts[1]
+            studies,desc,modality=self.dicomConnection.listStudies(patientID=patientID)
+            for i in range(0,len(studies)):
+                s=("%s - %s" % (desc[i],studies[i])).replace("/","")
+                tmp.append(s)
+                self.patientroot_study_mapping[s]=studies[i]
+
+        if len(self.pathparts)==3 and self.pathparts[0] == 'Patient-Study-Series-Instance':
+            if self.pathparts[1] in self.patient_mapping:
+                patientID=self.patient_mapping[self.pathparts[1]]
+            else:
+                patientID=self.pathparts[1]
+                        
+            if self.pathparts[2] in self.patientroot_study_mapping:
+                studyUID=self.patientroot_study_mapping[self.pathparts[2]]
+            else:
+                studyUID=self.pathparts[2]
+
+            series,desc,modality=self.dicomConnection.listSeries(patientID=patientID,studyUID=studyUID)
+            for i in range(0,len(series)):
+                s=("%s - %s - %s" % (desc[i],modality[i],series[i])).replace("/","")
+                tmp.append(s)
+                self.patientroot_series_mapping[s]=series[i]   
+
+        if len(self.pathparts)==4 and (self.pathparts[0] == 'Patient-Study-Series-Instance' or self.pathparts[0] == 'Patient-Study-Series-Instance'):
+            if self.pathparts[1] in self.patient_mapping:
+                patientID=self.patient_mapping[self.pathparts[1]]
+            else:
+                patientID=self.pathparts[1]
+            if self.pathparts[2] in self.patientroot_study_mapping:
+                studyUID=self.patientroot_study_mapping[self.pathparts[2]]
+            else:
+                studyUID=self.pathparts[2]
+            if self.pathparts[3] in self.patientroot_series_mapping:
+                seriesUID=self.patientroot_series_mapping[self.pathparts[3]]
+            else:
+                seriesUID=self.pathparts[3]
+            resdir=self.dicomConnection.downloadSeries(studyUID=studyUID, seriesUID=seriesUID, outputdir=self.cachedir).strip("/")
+            for f in os.listdir("/"+resdir):
+                st=os.lstat("/"+resdir + "/"+f)
+                self.attributeCache[path_stripped+ "/"+f]=st
+                fileaccessCache[path_stripped+ "/"+f]="/"+resdir + "/"+f
+                tmp.append(f)
               
         if len(self.pathparts)==2 and self.pathparts[0] == 'Study-Series-Instance':
             if self.pathparts[1] in self.study_mapping:
                 studyUID=self.study_mapping[self.pathparts[1]]
             else:
                 studyUID=self.pathparts[1]
-            series,desc,modality=self.dicomConnection.StudyRoot_listSeries(studyUID=studyUID)
+            series,desc,modality=self.dicomConnection.listSeries(studyUID=studyUID)
             for i in range(0,len(series)):
                 s=("%s - %s - %s" % (desc[i],modality[i],series[i])).replace("/","")
                 tmp.append(s)
@@ -368,7 +475,7 @@ class DicomFS(Fuse):
                 studyUID=self.study_mapping[self.pathparts[1]]
             else:
                 studyUID=self.pathparts[1]        
-            series,desc,modality=self.dicomConnection.StudyRoot_listSeries(studyUID=studyUID)
+            series,desc,modality=self.dicomConnection.listSeries(studyUID=studyUID)
             for i in range(0,len(series)):
                 s=("%s - %s - %s" % (desc[i],modality[i],series[i])).replace("/","")
                 tmp.append(series[i])
@@ -383,7 +490,7 @@ class DicomFS(Fuse):
                 seriesUID=self.series_mapping[self.pathparts[2]]
             else:
                 seriesUID=self.pathparts[1]
-            resdir=self.dicomConnection.StudyRoot_downloadSeries(studyUID=studyUID, seriesUID=seriesUID, outputdir=self.cachedir).strip("/")
+            resdir=self.dicomConnection.downloadSeries(studyUID=studyUID, seriesUID=seriesUID, outputdir=self.cachedir).strip("/")
             for f in os.listdir("/"+resdir):
                 st=os.lstat("/"+resdir + "/"+f)
                 self.attributeCache[path_stripped+ "/"+f]=st
@@ -420,6 +527,5 @@ DicomFS
     server.createConnection()
     server.main()
 
-#print "/a/b/".strip("/").split("/")
 if __name__ == '__main__':
     main()
