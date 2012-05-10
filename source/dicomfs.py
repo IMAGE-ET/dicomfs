@@ -1,11 +1,8 @@
 #!/usr/bin/env python
 #
 #
-#    This program can be distributed under the terms of the GNU GPL v3.
+#    This program can be distributed under the terms of the GNU LGPL
 #
-
-# to be cited: Distributed PACS using Network Shared File System
-
 
 import os, stat, errno, commands, sys, re,time,threading
 from errno import *
@@ -13,9 +10,9 @@ from stat import *
 import fuse,fcntl
 from fuse import Fuse
 import gdcm
-import base64
 import hashlib
 import datetime
+from subprocess import call
 
 if gdcm.Version.GetMajorVersion()<2 or (gdcm.Version.GetMajorVersion()==2 and gdcm.Version.GetMinorVersion()<2):
     print
@@ -27,8 +24,16 @@ if not hasattr(fuse, '__version__'):
     raise RuntimeError, \
         "your fuse-py doesn't know of fuse.__version__, probably it's too old."
 
+globaloptions=dict()
+globaloptions['cachedir']="ORIGINAL"
 fuse.fuse_python_api = (0, 2)
 
+
+def uploadFile(filename):
+    # GDCM causes segfault... -> I need storescu from dcmtk for the ugly workaround.
+    call(['storescu',globaloptions['server'],str(globaloptions['remoteport']),filename,"-aet",globaloptions['aet'],"-aec",globaloptions['aec']])    
+#    cnf_upload = gdcm.CompositeNetworkFunctions()
+#    cnf_upload.CStore(globaloptions['server'],int(globaloptions['remoteport']),filename,globaloptions['aet'],globaloptions['aec']) 
 
 def flag2mode(flags):
     md = {os.O_RDONLY: 'r', os.O_WRONLY: 'w', os.O_RDWR: 'w+'}
@@ -42,7 +47,11 @@ def flag2mode(flags):
 class XmpFile(object):
 
         def __init__(self, path, flags, *mode):
-            self.filename=fileaccessCache[path.strip("/")]
+            stripped=path.strip("/")
+            if stripped in fileaccessCache: 
+                self.filename=fileaccessCache[stripped]
+            else:
+                self.filename=globaloptions['cachedir']+"/"+stripped
             self.file = os.fdopen(os.open(self.filename, flags, *mode),flag2mode(flags))
             self.fd = self.file.fileno()
             self.upload = False
@@ -56,12 +65,13 @@ class XmpFile(object):
         def write(self, buf, offset):
             self.file.seek(offset)
             self.file.write(buf)
-
+            self.upload = True
             return len(buf)
 
         def release(self, flags):
             self.file.close()
-#            if self.upload: uploadFile(self,self.cachedir+path)
+            if self.upload: 
+                uploadFile(self.filename)
             self.upload = False
 
         def _fflush(self):
@@ -118,10 +128,10 @@ class DicomDataset(object):
 class DicomConnection(object):
 
     server=""
-    remoteport=1040
-    localport=11112
-    aetitle="DICOMFS_AE"
-    caller="DICOMFS_CALLER"
+    remoteport=0
+    localport=0
+    aetitle=""
+    caller=""
     
     def __init__(self,server="",port=1040,aetitle="DICOMFS_AE",caller="DICOMFS_CALLER",localport=11112):
         self.server=str(server)
@@ -323,9 +333,15 @@ class DicomFS(Fuse):
         self.localport=11112
         self.cachedir="/tmp/dicomfs"
         self.refresh=999999
-
+        self.clearCaches()
+        
     def createConnection(self):
         self.dicomConnection=DicomConnection(server=self.serveraddress, port=self.serverport, localport=self.localport, aetitle=self.aet, caller=self.aec)
+        globaloptions['cachedir']=self.cachedir        
+        globaloptions['server']=self.serveraddress
+        globaloptions['remoteport']=self.serverport
+        globaloptions['aet']=self.aet
+        globaloptions['aec']=self.aec
         self.clearCaches()
 
     def clearCaches(self):
@@ -339,52 +355,92 @@ class DicomFS(Fuse):
         self.patientroot_series_mapping=dict()        
         fileaccessCache=dict()       
 
-    def empty(self):
+
+#########################################################################
+
+    def truncate(self, path, len):
+        f = open(globaloptions['cachedir'] + path, "a")
+        f.truncate(len)
+        f.close()
+
+    def mknod(self, path, mode, dev):
+        os.mknod(globaloptions['cachedir'] + path, mode, dev)
+
+    def mkdir(self, path, mode):
+        os.mkdir(globaloptions['cachedir'] + path, mode)
+
+    def fsinit(self):
+        os.chdir(globaloptions['cachedir'])
+        os.mkdir(globaloptions['cachedir']+"/upload")
+
+    def chmod(self,path,mode):
         pass
 
-    def runOnce(self):
-        self.clearCaches()
-        self.runOnce=self.empty
+#########################################################################
 
     def getattr(self, path):
-        self.runOnce()
-        self.path=path.strip("/")
-        self.pathparts=path.split('/')
-        if self.path in self.attributeCache:
-            return self.attributeCache[self.path]
+        
+        stripped_path=path.strip("/")
+        
+        pathparts=stripped_path.split('/')
 
         st = MyStat()
+        st.st_nlink = 2
 
-        if len(self.pathparts)<=4:
-            st.st_mode = stat.S_IFDIR | 0755
-            st.st_nlink = 2
+        if pathparts[0]=='upload':
+            if len(pathparts)==1:
+                st.st_mode = stat.S_IFDIR | 0770
+            else:
+                st=os.lstat(self.cachedir+"/"+stripped_path)
 
-        if (len(self.pathparts))>0 and self.pathparts[1]=='Patient-Study-Series-Instance' and len(self.pathparts)<=5:
-            st.st_mode = stat.S_IFDIR | 0755
-            st.st_nlink = 2
-          
-        self.attributeCache[self.path]=st
-        return self.attributeCache[self.path]
+            self.attributeCache[stripped_path]=st  
+            return st
+
+        if stripped_path in self.attributeCache:
+            return self.attributeCache[stripped_path]
+
+        st.st_mode = stat.S_IFDIR | 0660
+        self.attributeCache[stripped_path]=st
+        if len(pathparts)==0:
+            return st
+        
+
+        if os.path.exists(self.cachedir+"/"+stripped_path):
+            st=os.lstat(self.cachedir+"/"+stripped_path)
+            self.attributeCache[stripped_path]=st  
+            return st            
+
+        st.st_mode = stat.S_IFDIR | 0755
+        st.st_nlink = 2
+
+        self.attributeCache[stripped_path]=st
+        return st
 
     def readdir(self, path, offset):
-        path=path.strip("/")
-
-        if path=="clear_cache":
-            self.clearCaches()
-
-        if path in self.directoryCache:
-            for r in self.directoryCache[path]:
-                yield fuse.Direntry(r)
-            return
-
-        path_stripped=path.strip()
+        path_stripped=path.strip("/")
 
         tmp=list()
         tmp.append('.')
         tmp.append('..')
 
-        if path == '':
-            tmp.extend(['Patient-Study-Series-Instance','Study-Series-Instance','Study-Series-Instance_UID', 'clear_cache']) # 'Patient-Study-Modality-Series-Instance'
+        if path_stripped=="clear_cache":
+            self.clearCaches()
+
+        if path_stripped.startswith("upload"):
+            ls=os.listdir(self.cachedir+"/"+path_stripped)
+            ls.append(".")
+            ls.append("..")
+            tmp=list(set(ls))
+            self.directoryCache[path_stripped]=tmp
+
+        if path_stripped == '':
+            tmp.extend(['upload','Patient-Study-Series-Instance','Study-Series-Instance','Study-Series-Instance_UID', 'clear_cache']) 
+            self.directoryCache[path_stripped]=tmp
+
+        if path_stripped in self.directoryCache:
+            for r in self.directoryCache[path_stripped]:
+                yield fuse.Direntry(r)
+            return
 
         if path_stripped == 'Study-Series-Instance_UID':
             study,desc,timestamp=self.dicomConnection.listStudies()
@@ -409,7 +465,7 @@ class DicomFS(Fuse):
                 self.patient_mapping[s]=patient[i]
 
 
-        self.pathparts=path.split('/')
+        self.pathparts=path_stripped.split('/')
 
         if len(self.pathparts)==2 and self.pathparts[0] == 'Patient-Study-Series-Instance':
             if self.pathparts[1] in self.patient_mapping:
@@ -499,7 +555,10 @@ class DicomFS(Fuse):
             
         for name in tmp:
             yield fuse.Direntry(name)
-        self.directoryCache[path]=tmp
+        self.directoryCache[path_stripped]=tmp
+
+
+
 
     def main(self, *a, **kw):
         self.file_class = XmpFile
