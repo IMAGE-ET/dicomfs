@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2.7
 #
 #
 #    This program can be distributed under the terms of the GNU LGPL
@@ -55,7 +55,7 @@ class XmpFile(object):
             self.file = os.fdopen(os.open(self.filename, flags, *mode),flag2mode(flags))
             self.fd = self.file.fileno()
             self.upload = False
-            self.direct_io=0
+            self.direct_io=1
             self.keep_cache=1            
 
         def read(self, length, offset):
