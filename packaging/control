@@ -6,5 +6,5 @@ Essential: no
 Maintainer: David Volgyes <david.volgyes@gmail.com>
 Description: filesystem client for DICOM PACS servers
  dicomfs is filesystem client based on gdcm and fuse.
-Depends: python, python-fuse, python-gdcm (>=2.2.0), 
+Depends: python, python-fuse, python-gdcm (>=2.2.0)
 Version: 0.6
