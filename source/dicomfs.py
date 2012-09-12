@@ -30,10 +30,10 @@ fuse.fuse_python_api = (0, 2)
 
 
 def uploadFile(filename):
-    # GDCM causes segfault... -> I need storescu from dcmtk for the ugly workaround.
-    call(['storescu',globaloptions['server'],str(globaloptions['remoteport']),filename,"-aet",globaloptions['aet'],"-aec",globaloptions['aec']])    
-#    cnf_upload = gdcm.CompositeNetworkFunctions()
-#    cnf_upload.CStore(globaloptions['server'],int(globaloptions['remoteport']),filename,globaloptions['aet'],globaloptions['aec']) 
+    cnf_upload = gdcm.CompositeNetworkFunctions()
+    cnf_filename = gdcm.FilenamesType()
+    cnf_filename.append(filename)
+    cnf_upload.CStore(globaloptions['server'],int(globaloptions['remoteport']),cnf_filename,globaloptions['aet'],globaloptions['aec']) 
 
 def flag2mode(flags):
     md = {os.O_RDONLY: 'r', os.O_WRONLY: 'w', os.O_RDWR: 'w+'}
